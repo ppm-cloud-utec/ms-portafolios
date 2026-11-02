@@ -117,14 +117,16 @@ def manejar(event, context):
                     continue
 
                 if tipo in ("tarea.creada", "tarea.completada"):
+                    # int() explicito: la columna es BIGINT y no se deja a la
+                    # inferencia de tipos del driver un contrato entre servicios.
                     _recalcular_avance(
                         cur,
-                        datos["proyecto_id"],
+                        int(datos["proyecto_id"]),
                         int(datos.get("total_tareas", 0)),
                         int(datos.get("tareas_completadas", 0)),
                     )
                 elif tipo == "presupuesto.excedido":
-                    _marcar_riesgo(cur, datos["proyecto_id"],
+                    _marcar_riesgo(cur, int(datos["proyecto_id"]),
                                    datos.get("ejecutado_pct", 100))
                 else:
                     # La filter policy no deberia dejarlo pasar, pero si cambia
