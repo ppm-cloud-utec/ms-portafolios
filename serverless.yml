@@ -56,14 +56,140 @@ custom:
     identitySource: method.request.header.Authorization
 
 functions:
+
   health:
     handler: src/handlers/health.manejar
     events:
-      - http:
-          path: /health
-          method: get
-          cors: true
-          authorizer: ${self:custom.autorizador}
+      - http: { path: "/health", method: get, cors: true, authorizer: "${self:custom.autorizador}" }
 
-  # TODO(Brisseth-raton): tus endpoints van aqui. Minimo 5 protegidos.
-  # Copia el bloque de health y cambia path/method/handler.
+  # ---------- Portafolios ----------
+  listarPortafolios:
+    handler: src/handlers/portafolios.listar
+    description: Portafolios con el resumen de sus proyectos
+    events:
+      - http: { path: "/portafolios", method: get, cors: true, authorizer: "${self:custom.autorizador}" }
+
+  obtenerPortafolio:
+    handler: src/handlers/portafolios.obtener
+    events:
+      - http: { path: "/portafolios/{id}", method: get, cors: true, authorizer: "${self:custom.autorizador}" }
+
+  crearPortafolio:
+    handler: src/handlers/portafolios.crear
+    events:
+      - http: { path: "/portafolios", method: post, cors: true, authorizer: "${self:custom.autorizador}" }
+
+  # ---------- Proyectos ----------
+  listarProyectos:
+    handler: src/handlers/proyectos.listar
+    description: Listado filtrable por estado, portafolio, salud y riesgo
+    events:
+      - http: { path: "/proyectos", method: get, cors: true, authorizer: "${self:custom.autorizador}" }
+
+  obtenerProyecto:
+    handler: src/handlers/proyectos.obtener
+    events:
+      - http: { path: "/proyectos/{id}", method: get, cors: true, authorizer: "${self:custom.autorizador}" }
+
+  crearProyecto:
+    handler: src/handlers/proyectos.crear
+    description: Publica proyecto.creado
+    events:
+      - http: { path: "/proyectos", method: post, cors: true, authorizer: "${self:custom.autorizador}" }
+
+  actualizarProyecto:
+    handler: src/handlers/proyectos.actualizar
+    description: Publica proyecto.priorizado si cambia la prioridad
+    events:
+      - http: { path: "/proyectos/{id}", method: put, cors: true, authorizer: "${self:custom.autorizador}" }
+
+  # ---------- Admision de demanda ----------
+  listarPropuestas:
+    handler: src/handlers/propuestas.listar
+    description: La bandeja de admision, rankeada por score
+    events:
+      - http: { path: "/propuestas", method: get, cors: true, authorizer: "${self:custom.autorizador}" }
+
+  crearPropuesta:
+    handler: src/handlers/propuestas.crear
+    events:
+      - http: { path: "/propuestas", method: post, cors: true, authorizer: "${self:custom.autorizador}" }
+
+  aprobarPropuesta:
+    handler: src/handlers/propuestas.aprobar
+    description: Convierte la propuesta en proyecto y publica proyecto.creado
+    events:
+      - http: { path: "/propuestas/{id}/aprobar", method: post, cors: true, authorizer: "${self:custom.autorizador}" }
+
+  rechazarPropuesta:
+    handler: src/handlers/propuestas.rechazar
+    events:
+      - http: { path: "/propuestas/{id}/rechazar", method: post, cors: true, authorizer: "${self:custom.autorizador}" }
+
+  priorizacion:
+    handler: src/handlers/propuestas.priorizacion
+    description: Ranking mas el consumo de presupuesto de la seleccion
+    events:
+      - http: { path: "/priorizacion", method: get, cors: true, authorizer: "${self:custom.autorizador}" }
+
+  # ---------- Consumidor de eventos (EDA) ----------
+  worker:
+    handler: src/handlers/worker.manejar
+    description: Recalcula avance y salud a partir de los eventos de SQS
+    timeout: 60
+    events:
+      - sqs:
+          arn: !GetAtt ColaPortafolios.Arn
+          batchSize: 10
+
+resources:
+  Resources:
+
+    # Cola propia de este consumidor. Cada microservicio tiene la suya: asi
+    # uno caido no afecta a los demas y sus mensajes se acumulan.
+    ColaPortafolios:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ppm-cola-portafolios-${sls:stage}
+        VisibilityTimeout: 120
+        RedrivePolicy:
+          deadLetterTargetArn: !GetAtt ColaPortafoliosDLQ.Arn
+          maxReceiveCount: 3
+
+    ColaPortafoliosDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ppm-cola-portafolios-dlq-${sls:stage}
+        MessageRetentionPeriod: 1209600
+
+    # Suscripcion al topic compartido CON FILTRO: la cola solo recibe los 3
+    # tipos que este worker sabe procesar, no todo el trafico del sistema.
+    SuscripcionPortafolios:
+      Type: AWS::SNS::Subscription
+      Properties:
+        TopicArn: ${cf:infra-compartida-${sls:stage}.SnsEventosArn}
+        Protocol: sqs
+        Endpoint: !GetAtt ColaPortafolios.Arn
+        RawMessageDelivery: false
+        FilterPolicy:
+          tipo:
+            - tarea.creada
+            - tarea.completada
+            - presupuesto.excedido
+
+    # Sin esta politica SNS no puede escribir en la cola.
+    PermisoSnsEnCola:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues:
+          - !Ref ColaPortafolios
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal: { Service: sns.amazonaws.com }
+              Action: sqs:SendMessage
+              Resource: !GetAtt ColaPortafolios.Arn
+              Condition:
+                ArnEquals:
+                  aws:SourceArn: ${cf:infra-compartida-${sls:stage}.SnsEventosArn}
