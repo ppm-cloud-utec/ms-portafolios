@@ -78,21 +78,21 @@ OBJETIVOS = [
 
 
 def dsn(db_name=None):
-    return (
-        f"host={os.environ['DB_HOST']} port=5432 "
-        f"dbname={db_name or os.environ.get('DB_NAME', 'ppm_portafolios')} "
-        f"user={os.environ['DB_USER']} password={os.environ['DB_PASSWORD']}"
-    )
+    """Parámetros explícitos: credenciales con caracteres especiales no rompen DSN."""
+    return dict(host=os.environ["DB_HOST"], port=int(os.environ.get("DB_PORT", 5432)),
+                dbname=db_name or os.environ.get("DB_NAME", "ppm_portafolios"),
+                user=os.environ["DB_USER"], password=os.environ["DB_PASSWORD"],
+                connect_timeout=10, sslmode=os.environ.get("DB_SSLMODE", "require"))
 
 
 def aplicar_esquema():
     """Corre esquema.sql en los 3 schemas de tenant."""
     sql = open(os.path.join(os.path.dirname(__file__), "esquema.sql")).read()
-    with psycopg.connect(dsn()) as con:
+    with psycopg.connect(**dsn()) as con:
         for tenant_id, schema in SCHEMAS.items():
             with con.cursor() as cur:
                 cur.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
-                cur.execute(f"SET search_path TO {schema}")
+                cur.execute("SELECT set_config('search_path', %s, true)", (schema,))
                 cur.execute(sql)
             con.commit()
             print(f"  esquema aplicado en {schema}")
@@ -103,9 +103,18 @@ def generar(tenant_id, perfil):
     hoy = date.today()
     total = 0
 
-    with psycopg.connect(dsn()) as con:
+    with psycopg.connect(**dsn()) as con:
         with con.cursor() as cur:
-            cur.execute(f"SET search_path TO {schema}")
+            cur.execute("SELECT set_config('search_path', %s, true)", (schema,))
+
+            # Nunca mezclar una nueva carga con datos previos.
+            cur.execute("""SELECT
+                (SELECT COUNT(*) FROM portafolios) +
+                (SELECT COUNT(*) FROM proyectos) +
+                (SELECT COUNT(*) FROM propuestas) +
+                (SELECT COUNT(*) FROM historial_estado)""")
+            if cur.fetchone()[0]:
+                raise RuntimeError(f"{schema} ya contiene datos; el seed solo se ejecuta una vez")
 
             # --- portafolios ---
             ids_portafolio = []
@@ -214,8 +223,8 @@ def contar():
     print(f"Database: {os.environ.get('DB_NAME', 'ppm_portafolios')}\n")
     gran_total = 0
     for tenant_id, schema in SCHEMAS.items():
-        with psycopg.connect(dsn()) as con, con.cursor() as cur:
-            cur.execute(f"SET search_path TO {schema}")
+        with psycopg.connect(**dsn()) as con, con.cursor() as cur:
+            cur.execute("SELECT set_config('search_path', %s, true)", (schema,))
             sub = 0
             print(f"  {schema}")
             for t in ("portafolios", "proyectos", "propuestas", "historial_estado"):
