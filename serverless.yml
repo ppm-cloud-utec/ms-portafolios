@@ -11,32 +11,28 @@ provider:
   region: us-east-1
   stage: ${opt:stage, "dev"}
   memorySize: 512
+  logRetentionInDays: 14
   timeout: 29
   architecture: x86_64
   environment:
     SERVICIO: ${self:service}
     SNS_TOPIC_ARN: ${cf:infra-compartida-${sls:stage}.SnsEventosArn}
-    TABLA_EVENTOS_PROCESADOS: ${cf:infra-compartida-${sls:stage}.TablaEventosProcesados}
     DB_HOST: ${cf:infra-compartida-${sls:stage}.RdsEndpoint}
     DB_NAME: ppm_portafolios
     DB_USER: ${ssm:/ppm/portafolios/db-user}
-    DB_PASSWORD: ${ssm:/ppm/portafolios/db-password}
-  # AWS Academy no permite crear roles IAM: se reusa LabRole.
-  # En una cuenta propia, borra la linea `role:` y descomenta los permisos,
-  # que son los minimos que este microservicio necesita.
+    # El secreto se consulta en runtime, no se almacena en CloudFormation.
+    DB_PASSWORD_PARAM: /ppm/portafolios/db-password
+    DB_SSLMODE: require
+    CORS_ALLOWED_ORIGIN: ${env:PPM_ALLOWED_ORIGIN, '*'}
+  # AWS Academy: reutilizamos LabRole (permisos deben verificarse).
+  # Fuera del laboratorio, sustituir por un rol de mínimo privilegio por función.
   iam:
     role: arn:aws:iam::${aws:accountId}:role/LabRole
-    # role:
-    #   statements:
-  #     - Effect: Allow
-  #       Action:
-  #         - sns:Publish
-  #       Resource: ${cf:infra-compartida-${sls:stage}.SnsEventosArn}
-  #     - Effect: Allow
-  #       Action:
-  #         - dynamodb:PutItem
-  #       Resource: ${cf:infra-compartida-${sls:stage}.TablaEventosProcesadosArn}
-  #
+  # Requiere ssm:GetParameter y sns:Publish, además de permisos VPC si aplica.
+  # VPC: configurar con los outputs REALES de infra-compartida si RDS es privado.
+  # vpc:
+  #   securityGroupIds: [${cf:infra-compartida-${sls:stage}.LambdaSecurityGroupId}]
+  #   subnetIds: [${cf:infra-compartida-${sls:stage}.PrivateSubnetA}, ${cf:infra-compartida-${sls:stage}.PrivateSubnetB}]
 package:
   individually: false
   patterns:
@@ -47,6 +43,12 @@ plugins:
   - serverless-python-requirements
 
 custom:
+  cors:
+    origin: ${env:PPM_ALLOWED_ORIGIN, '*'}
+    headers:
+      - Content-Type
+      - Authorization
+    allowCredentials: false
   pythonRequirements:
     # true, no "non-linux": en Linux "non-linux" NO usa Docker y busca un
     # binario python3.12 local, que no existe (el sistema trae 3.14).
@@ -71,77 +73,86 @@ functions:
   health:
     handler: src/handlers/health.manejar
     events:
-      - http: { path: "/health", method: get, cors: true, authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/health", method: get, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
   # ---------- Portafolios ----------
   listarPortafolios:
     handler: src/handlers/portafolios.listar
     description: Portafolios con el resumen de sus proyectos
     events:
-      - http: { path: "/portafolios", method: get, cors: true, authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/portafolios", method: get, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
   obtenerPortafolio:
     handler: src/handlers/portafolios.obtener
     events:
-      - http: { path: "/portafolios/{id}", method: get, cors: true, authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/portafolios/{id}", method: get, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
   crearPortafolio:
     handler: src/handlers/portafolios.crear
     events:
-      - http: { path: "/portafolios", method: post, cors: true, authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/portafolios", method: post, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
   # ---------- Proyectos ----------
   listarProyectos:
     handler: src/handlers/proyectos.listar
     description: Listado filtrable por estado, portafolio, salud y riesgo
     events:
-      - http: { path: "/proyectos", method: get, cors: true, authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/proyectos", method: get, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
   obtenerProyecto:
     handler: src/handlers/proyectos.obtener
     events:
-      - http: { path: "/proyectos/{id}", method: get, cors: true, authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/proyectos/{id}", method: get, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
   crearProyecto:
     handler: src/handlers/proyectos.crear
     description: Publica proyecto.creado
     events:
-      - http: { path: "/proyectos", method: post, cors: true, authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/proyectos", method: post, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
   actualizarProyecto:
     handler: src/handlers/proyectos.actualizar
     description: Publica proyecto.priorizado si cambia la prioridad
     events:
-      - http: { path: "/proyectos/{id}", method: put, cors: true, authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/proyectos/{id}", method: put, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
   # ---------- Admision de demanda ----------
   listarPropuestas:
     handler: src/handlers/propuestas.listar
     description: La bandeja de admision, rankeada por score
     events:
-      - http: { path: "/propuestas", method: get, cors: true, authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/propuestas", method: get, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
   crearPropuesta:
     handler: src/handlers/propuestas.crear
     events:
-      - http: { path: "/propuestas", method: post, cors: true, authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/propuestas", method: post, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
   aprobarPropuesta:
     handler: src/handlers/propuestas.aprobar
     description: Convierte la propuesta en proyecto y publica proyecto.creado
     events:
-      - http: { path: "/propuestas/{id}/aprobar", method: post, cors: true, authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/propuestas/{id}/aprobar", method: post, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
   rechazarPropuesta:
     handler: src/handlers/propuestas.rechazar
     events:
-      - http: { path: "/propuestas/{id}/rechazar", method: post, cors: true, authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/propuestas/{id}/rechazar", method: post, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
   priorizacion:
     handler: src/handlers/propuestas.priorizacion
     description: Ranking mas el consumo de presupuesto de la seleccion
     events:
-      - http: { path: "/priorizacion", method: get, cors: true, authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/priorizacion", method: get, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
+
+  # ---------- Reintentos de eventos pendientes (outbox) ----------
+  publicadorOutbox:
+    handler: src/handlers/publicador.manejar
+    description: Reintentos cada minuto para eventos SNS pendientes
+    timeout: 60
+    reservedConcurrency: 1
+    events:
+      - schedule: rate(1 minute)
 
   # ---------- Consumidor de eventos (EDA) ----------
   worker:
@@ -152,6 +163,8 @@ functions:
       - sqs:
           arn: !GetAtt ColaPortafolios.Arn
           batchSize: 10
+          functionResponseType: ReportBatchItemFailures
+          maximumConcurrency: 2
 
 resources:
   Resources:
@@ -162,7 +175,7 @@ resources:
       Type: AWS::SQS::Queue
       Properties:
         QueueName: ppm-cola-portafolios-${sls:stage}
-        VisibilityTimeout: 120
+        VisibilityTimeout: 360
         RedrivePolicy:
           deadLetterTargetArn: !GetAtt ColaPortafoliosDLQ.Arn
           maxReceiveCount: 3
