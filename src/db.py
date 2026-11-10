@@ -1,47 +1,54 @@
-"""Conexion a RDS PostgreSQL con aislamiento por schema de tenant.
-
-Patron del enunciado: Single Database, Multiple Schemas. Una database por
-microservicio, y dentro un schema por tenant.
-"""
+"""Conexión PostgreSQL con selección de schema exclusivamente por identidad JWT."""
 import os
+import time
 from contextlib import contextmanager
 
+import boto3
 import psycopg
 
-SCHEMAS = {
-    "t-acme": "t_acme",
-    "t-globex": "t_globex",
-    "t-initech": "t_initech",
-}
+SCHEMAS = {"t-acme": "t_acme", "t-globex": "t_globex", "t-initech": "t_initech"}
+_password = None
+_expira = 0
 
 
-def _dsn():
-    return (
-        f"host={os.environ['DB_HOST']} port=5432 "
-        f"dbname={os.environ['DB_NAME']} "
-        f"user={os.environ['DB_USER']} password={os.environ['DB_PASSWORD']} "
-        f"connect_timeout=5"
-    )
+def password_bd():
+    """No resuelve el secreto en CloudFormation ni lo graba en env de Lambda."""
+    global _password, _expira
+    # Solo para pruebas locales; en AWS se configura DB_PASSWORD_PARAM.
+    if os.environ.get("DB_PASSWORD"):
+        return os.environ["DB_PASSWORD"]
+    parametro = os.environ["DB_PASSWORD_PARAM"]
+    if _password is None or time.monotonic() >= _expira:
+        _password = boto3.client("ssm").get_parameter(
+            Name=parametro, WithDecryption=True
+        )["Parameter"]["Value"]
+        _expira = time.monotonic() + 300
+    return _password
+
+
+def _parametros():
+    return {
+        "host": os.environ["DB_HOST"],
+        "port": int(os.environ.get("DB_PORT", "5432")),
+        "dbname": os.environ.get("DB_NAME", "ppm_portafolios"),
+        "user": os.environ["DB_USER"],
+        "password": password_bd(),
+        "connect_timeout": 5,
+        "sslmode": os.environ.get("DB_SSLMODE", "require"),
+        "application_name": "ms-portafolios",
+    }
 
 
 @contextmanager
 def conexion(tenant_id):
-    """Abre la conexion y fija el search_path al schema del tenant.
-
-    De ahi en adelante los queries van sin prefijo: `SELECT * FROM proyectos`
-    ya solo ve las filas de ese tenant.
-    """
     schema = SCHEMAS.get(tenant_id)
-    if not schema:
-        raise ValueError(f"tenant desconocido: {tenant_id}")
-    con = psycopg.connect(_dsn())
-    try:
+    if schema is None:
+        raise PermissionError("Tenant no autorizado")
+    with psycopg.connect(**_parametros()) as con:
         with con.cursor() as cur:
-            cur.execute(f"SET search_path TO {schema}")
+            # set_config local: funciona solo dentro de esta transacción.
+            # Nunca interpolar un tenant procedente del usuario en SQL.
+            cur.execute("SELECT set_config('search_path', %s, true)", (schema,))
+            cur.execute("SET LOCAL statement_timeout = '8000ms'")
+            cur.execute("SET LOCAL lock_timeout = '3000ms'")
         yield con
-        con.commit()
-    except Exception:
-        con.rollback()
-        raise
-    finally:
-        con.close()
