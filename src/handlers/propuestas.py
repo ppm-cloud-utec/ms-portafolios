@@ -1,239 +1,195 @@
-"""Admision de demanda: cualquiera propone, el PMO decide.
-
-Es la puerta de entrada del portafolio y lo que distingue un PPM de una lista
-de proyectos. Planview lo llama demand intake; Smartsheet, flujos de admision
-y aprobacion.
-"""
+"""Admisión de demanda, decisiones de PMO y simulación de priorización."""
 from psycopg.rows import dict_row
 
 from src import db, roles
-from src.eventos import publicar
+from src.api import endpoint
+from src.dominio import calcular_score
+from src.eventos import encolar, intentar_publicar
 from src.respuesta import cuerpo_de, error, ok, tenant_de, usuario_de
+from src.validacion import (ValidacionError, campos_permitidos, dinero, entero,
+                            id_ruta, opcion, paginacion, requeridos, texto,
+                            uuid_opcional)
+
+ESTADOS = ("pendiente", "aprobada", "rechazada")
+CAMPOS = ("portafolio_id", "nombre", "problema", "costo_estimado",
+          "beneficio_esperado", "valor_estrategico", "urgencia", "riesgo")
 
 
-def calcular_score(valor_estrategico, urgencia, riesgo, costo, beneficio):
-    """Score de 0 a 100. Mas valor y beneficio suben; mas costo y riesgo bajan.
-
-    La formula es deliberadamente simple y explicable: el PMO tiene que poder
-    entender por que un proyecto quedo arriba. Planview lo vende como priorizar
-    "contra criterios de inversion, no por intuicion".
-
-        beneficio/costo se topa en 3x para que un caso optimista no domine
-        el ranking entero.
-    """
-    retorno = min(float(beneficio) / float(costo), 3.0) if float(costo) > 0 else 3.0
-    bruto = (
-        float(valor_estrategico) * 8      # peso 40 sobre 5
-        + float(urgencia) * 5             # peso 25 sobre 5
-        + retorno * 8.33                  # peso 25 sobre 3
-        - float(riesgo) * 2               # penalidad hasta 10
-    )
-    return round(max(0.0, min(bruto, 100.0)), 2)
-
-
+@endpoint
 def listar(event, context):
-    """GET /propuestas?estado=pendiente — la bandeja de admision, rankeada."""
     q = event.get("queryStringParameters") or {}
-    estado = q.get("estado", "pendiente")
-
+    estado = opcion(q.get("estado", "pendiente"), "estado", ESTADOS)
+    pagina, limite = paginacion(q)
     with db.conexion(tenant_de(event)) as con:
         with con.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM propuestas WHERE estado = %s", (estado,))
+            total = cur.fetchone()["n"]
             cur.execute("""
-                SELECT  pr.*, pf.nombre AS portafolio,
-                        pf.presupuesto_disponible
-                FROM    propuestas pr
-                JOIN    portafolios pf ON pf.id = pr.portafolio_id
-                WHERE   pr.estado = %s
-                ORDER BY pr.score DESC, pr.creado_en
-            """, (estado,))
+                SELECT pr.*, pf.nombre AS portafolio, pf.presupuesto_disponible
+                FROM propuestas pr JOIN portafolios pf ON pf.id = pr.portafolio_id
+                WHERE pr.estado = %s
+                ORDER BY pr.score DESC, pr.creado_en, pr.id
+                LIMIT %s OFFSET %s
+            """, (estado, limite, (pagina - 1) * limite))
             filas = cur.fetchall()
-    return ok(filas, meta={"total": len(filas), "estado": estado})
+    return ok(filas, meta={"total": total, "estado": estado,
+                            "pagina": pagina, "limite": limite})
 
 
+@endpoint
 def crear(event, context):
-    """POST /propuestas — cualquier rol puede proponer."""
-    tenant_id = tenant_de(event)
+    tenant = tenant_de(event)
     c = cuerpo_de(event)
-
-    obligatorios = ("portafolio_id", "nombre", "problema", "costo_estimado",
-                    "beneficio_esperado", "valor_estrategico", "urgencia", "riesgo")
-    faltan = [k for k in obligatorios if c.get(k) in (None, "")]
-    if faltan:
-        return error("DATOS_INCOMPLETOS", f"Falta: {', '.join(faltan)}")
-
-    for campo in ("valor_estrategico", "urgencia", "riesgo"):
-        if not 1 <= int(c[campo]) <= 5:
-            return error("FUERA_DE_RANGO", f"{campo} va de 1 a 5")
-    if float(c["costo_estimado"]) <= 0:
-        return error("COSTO_INVALIDO", "El costo estimado debe ser mayor que 0")
-
-    score = calcular_score(c["valor_estrategico"], c["urgencia"], c["riesgo"],
-                           c["costo_estimado"], c["beneficio_esperado"])
-
-    with db.conexion(tenant_id) as con:
+    campos_permitidos(c, CAMPOS)
+    requeridos(c, CAMPOS)
+    pid = entero(c["portafolio_id"], "portafolio_id", minimo=1)
+    nombre = texto(c["nombre"], "nombre")
+    problema = texto(c["problema"], "problema", maximo=2000)
+    costo = dinero(c["costo_estimado"], "costo_estimado", positivo=True)
+    beneficio = dinero(c["beneficio_esperado"], "beneficio_esperado")
+    criterios = {k: entero(c[k], k, minimo=1, maximo=5)
+                 for k in ("valor_estrategico", "urgencia", "riesgo")}
+    score = calcular_score(**criterios, costo=costo, beneficio=beneficio)
+    with db.conexion(tenant) as con:
         with con.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT 1 FROM portafolios WHERE id = %s AND activo", (pid,))
+            if not cur.fetchone():
+                return error("PORTAFOLIO_INVALIDO", "Portafolio inexistente o inactivo", 400)
             cur.execute("""
                 INSERT INTO propuestas
-                    (portafolio_id, nombre, problema, costo_estimado,
-                     beneficio_esperado, valor_estrategico, urgencia, riesgo,
-                     score, solicitante_id)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                RETURNING *
-            """, (c["portafolio_id"], c["nombre"].strip(), c["problema"].strip(),
-                  c["costo_estimado"], c["beneficio_esperado"],
-                  c["valor_estrategico"], c["urgencia"], c["riesgo"],
-                  score, usuario_de(event)))
+                    (portafolio_id, nombre, problema, costo_estimado, beneficio_esperado,
+                     valor_estrategico, urgencia, riesgo, score, solicitante_id)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *
+            """, (pid, nombre, problema, costo, beneficio,
+                  criterios["valor_estrategico"], criterios["urgencia"],
+                  criterios["riesgo"], score, usuario_de(event)))
             propuesta = cur.fetchone()
     return ok(propuesta, estado=201)
 
 
+@endpoint
 def aprobar(event, context):
-    """POST /propuestas/{id}/aprobar — solo el PMO. La convierte en proyecto.
-
-    Publica proyecto.creado, igual que la creacion directa: para los
-    suscriptores es indistinguible de donde vino el proyecto.
-    """
     negado = roles.exige(event, roles.PMO, roles.ADMIN)
     if negado:
         return negado
-
-    tenant_id = tenant_de(event)
-    pid = event["pathParameters"]["id"]
+    tenant, pid = tenant_de(event), id_ruta(event)
     c = cuerpo_de(event)
-
-    with db.conexion(tenant_id) as con:
+    campos_permitidos(c, ("responsable_id", "motivo"))
+    responsable = uuid_opcional(c.get("responsable_id"), "responsable_id")
+    motivo = texto(c.get("motivo", "aprobada por el PMO"), "motivo", maximo=500)
+    with db.conexion(tenant) as con:
         with con.cursor(row_factory=dict_row) as cur:
-            # FOR UPDATE: dos PMO aprobando la misma propuesta a la vez crearian
-            # dos proyectos duplicados.
             cur.execute("SELECT * FROM propuestas WHERE id = %s FOR UPDATE", (pid,))
             propuesta = cur.fetchone()
             if not propuesta:
-                return error("NO_ENCONTRADO", f"No existe la propuesta {pid}", 404)
+                return error("NO_ENCONTRADO", "Propuesta no encontrada", 404)
             if propuesta["estado"] != "pendiente":
-                return error("YA_DECIDIDA",
-                             f"La propuesta ya fue {propuesta['estado']}", 409)
-
+                return error("YA_DECIDIDA", "La propuesta ya tiene una decisión", 409)
+            # Código único independiente de la secuencia BIGSERIAL del id.
+            import uuid
+            codigo = f"PRY-{uuid.uuid4().hex[:12].upper()}"
             cur.execute("""
-                INSERT INTO proyectos
-                    (portafolio_id, codigo, nombre, descripcion, estado,
-                     prioridad_score, responsable_id, presupuesto_estimado)
-                VALUES (%s,
-                        'PRY-' || LPAD(nextval('proyectos_id_seq')::text, 5, '0'),
-                        %s, %s, 'aprobado', %s, %s, %s)
-                RETURNING *
-            """, (propuesta["portafolio_id"], propuesta["nombre"],
-                  propuesta["problema"], propuesta["score"],
-                  c.get("responsable_id"), propuesta["costo_estimado"]))
+                INSERT INTO proyectos (portafolio_id, codigo, nombre, descripcion,
+                    estado, prioridad_score, responsable_id, presupuesto_estimado)
+                VALUES (%s,%s,%s,%s,'aprobado',%s,%s,%s) RETURNING *
+            """, (propuesta["portafolio_id"], codigo, propuesta["nombre"],
+                  propuesta["problema"], propuesta["score"], responsable,
+                  propuesta["costo_estimado"]))
             proyecto = cur.fetchone()
-
             cur.execute("""
-                UPDATE propuestas
-                SET    estado = 'aprobada', decidido_por = %s, decidido_en = now(),
-                       motivo_decision = %s, proyecto_id = %s
-                WHERE  id = %s
-            """, (usuario_de(event), c.get("motivo", "aprobada por el PMO"),
-                  proyecto["id"], pid))
-
+                UPDATE propuestas SET estado='aprobada', decidido_por=%s,
+                    decidido_en=now(), motivo_decision=%s, proyecto_id=%s
+                WHERE id=%s
+            """, (usuario_de(event), motivo, proyecto["id"], pid))
             cur.execute("""
                 INSERT INTO historial_estado
                     (proyecto_id, estado_nuevo, motivo, cambiado_por)
-                VALUES (%s, 'aprobado', 'aprobacion de propuesta', %s)
+                VALUES (%s,'aprobado','aprobacion de propuesta',%s)
             """, (proyecto["id"], usuario_de(event)))
-
-    publicar("proyecto.creado", tenant_id, {
-        "proyecto_id": proyecto["id"],
-        "codigo": proyecto["codigo"],
-        "nombre": proyecto["nombre"],
-        "portafolio_id": proyecto["portafolio_id"],
-        "presupuesto_estimado": float(proyecto["presupuesto_estimado"]),
-        "origen": "propuesta",
-        "propuesta_id": int(pid),
-    })
-    return ok({"propuesta_id": int(pid), "proyecto": proyecto}, estado=201)
+            evento_id = encolar(cur, "proyecto.creado", tenant, {
+                "proyecto_id": proyecto["id"], "codigo": proyecto["codigo"],
+                "nombre": proyecto["nombre"], "portafolio_id": proyecto["portafolio_id"],
+                "presupuesto_estimado": float(proyecto["presupuesto_estimado"]),
+                "responsable_id": str(proyecto["responsable_id"]) if proyecto["responsable_id"] else None,
+                "origen": "propuesta", "propuesta_id": pid,
+            })
+    intentar_publicar(tenant, evento_id)
+    return ok({"propuesta_id": pid, "proyecto": proyecto}, estado=201)
 
 
+@endpoint
 def rechazar(event, context):
-    """POST /propuestas/{id}/rechazar — solo el PMO."""
     negado = roles.exige(event, roles.PMO, roles.ADMIN)
     if negado:
         return negado
-
-    pid = event["pathParameters"]["id"]
+    pid = id_ruta(event)
     c = cuerpo_de(event)
-    if not c.get("motivo"):
-        return error("MOTIVO_REQUERIDO", "Un rechazo necesita motivo")
-
+    campos_permitidos(c, ("motivo",))
+    requeridos(c, ("motivo",))
+    motivo = texto(c["motivo"], "motivo", maximo=500)
     with db.conexion(tenant_de(event)) as con:
         with con.cursor(row_factory=dict_row) as cur:
             cur.execute("""
-                UPDATE propuestas
-                SET    estado = 'rechazada', decidido_por = %s,
-                       decidido_en = now(), motivo_decision = %s
-                WHERE  id = %s AND estado = 'pendiente'
-                RETURNING *
-            """, (usuario_de(event), c["motivo"], pid))
+                UPDATE propuestas SET estado='rechazada', decidido_por=%s,
+                     decidido_en=now(), motivo_decision=%s
+                WHERE id=%s AND estado='pendiente' RETURNING *
+            """, (usuario_de(event), motivo, pid))
             propuesta = cur.fetchone()
-
     if not propuesta:
-        return error("NO_ENCONTRADO",
-                     f"La propuesta {pid} no existe o ya fue decidida", 404)
+        return error("NO_ENCONTRADO_O_DECIDIDA", "Propuesta inexistente o ya decidida", 409)
     return ok(propuesta)
 
 
+@endpoint
 def priorizacion(event, context):
-    """GET /priorizacion?portafolio_id=&seleccion=1,5,9
-
-    El ranking solo no sirve: devuelve tambien cuanto consumen juntas las
-    propuestas seleccionadas y si se pasan de lo disponible. Es el
-    scenario planning de Planview en su version minima.
-    """
     q = event.get("queryStringParameters") or {}
-    seleccion = [int(x) for x in q.get("seleccion", "").split(",") if x.strip().isdigit()]
-
+    raw = q.get("seleccion", "")
+    if not isinstance(raw, str) or len(raw) > 2000:
+        raise ValidacionError("seleccion es demasiado larga")
+    seleccion = set()
+    for valor in raw.split(","):
+        if valor.strip():
+            seleccion.add(entero(valor.strip(), "seleccion", minimo=1))
+    if len(seleccion) > 100:
+        raise ValidacionError("Se admiten como máximo 100 propuestas seleccionadas")
+    filtro, valores = "", []
+    if q.get("portafolio_id"):
+        filtro = "AND pr.portafolio_id = %s"
+        valores.append(entero(q["portafolio_id"], "portafolio_id", minimo=1))
     with db.conexion(tenant_de(event)) as con:
         with con.cursor(row_factory=dict_row) as cur:
-            filtro, valores = "", []
-            if q.get("portafolio_id"):
-                filtro = "AND pr.portafolio_id = %s"
-                valores.append(q["portafolio_id"])
-
             cur.execute(f"""
                 SELECT pr.id, pr.nombre, pr.score, pr.costo_estimado,
-                       pr.beneficio_esperado, pr.valor_estrategico,
-                       pr.urgencia, pr.riesgo, pf.nombre AS portafolio
-                FROM   propuestas pr
-                JOIN   portafolios pf ON pf.id = pr.portafolio_id
-                WHERE  pr.estado = 'pendiente' {filtro}
-                ORDER BY pr.score DESC
+                    pr.beneficio_esperado, pr.valor_estrategico, pr.urgencia,
+                    pr.riesgo, pf.nombre AS portafolio
+                FROM propuestas pr JOIN portafolios pf ON pf.id = pr.portafolio_id
+                WHERE pr.estado='pendiente' {filtro}
+                ORDER BY pr.score DESC, pr.id
             """, valores)
             ranking = cur.fetchall()
-
             cur.execute(f"""
-                SELECT COALESCE(SUM(pf.presupuesto_disponible), 0) AS disponible
-                FROM   portafolios pf
-                WHERE  pf.activo {filtro.replace('pr.portafolio_id', 'pf.id')}
+                SELECT COALESCE(SUM(pf.presupuesto_disponible),0) AS disponible
+                FROM portafolios pf WHERE pf.activo
+                {filtro.replace('pr.portafolio_id', 'pf.id')}
             """, valores)
-            disponible = float(cur.fetchone()["disponible"])
-
+            disponible = cur.fetchone()["disponible"]
             cur.execute(f"""
-                SELECT COALESCE(SUM(p.presupuesto_estimado), 0) AS comprometido
-                FROM   proyectos p
-                WHERE  p.estado IN ('aprobado', 'en_curso') {filtro.replace('pr.', 'p.')}
+                SELECT COALESCE(SUM(p.presupuesto_estimado),0) AS comprometido
+                FROM proyectos p WHERE p.estado IN ('aprobado','en_curso')
+                {filtro.replace('pr.portafolio_id', 'p.portafolio_id')}
             """, valores)
-            comprometido = float(cur.fetchone()["comprometido"])
-
+            comprometido = cur.fetchone()["comprometido"]
+    ids = {p["id"] for p in ranking}
+    if seleccion - ids:
+        raise ValidacionError("La selección contiene propuestas no disponibles")
+    from decimal import Decimal
+    costo = sum((p["costo_estimado"] for p in ranking if p["id"] in seleccion), Decimal(0))
     for p in ranking:
         p["seleccionada"] = p["id"] in seleccion
-
-    costo_seleccion = sum(float(p["costo_estimado"]) for p in ranking if p["seleccionada"])
     holgura = disponible - comprometido
-
     return ok(ranking, meta={
-        "total": len(ranking),
-        "presupuesto_disponible": disponible,
-        "ya_comprometido": comprometido,
-        "holgura": round(holgura, 2),
-        "costo_de_la_seleccion": round(costo_seleccion, 2),
-        "excede_capacidad": costo_seleccion > holgura,
-        "exceso": round(max(0.0, costo_seleccion - holgura), 2),
+        "total": len(ranking), "presupuesto_disponible": disponible,
+        "ya_comprometido": comprometido, "holgura": holgura,
+        "costo_de_la_seleccion": costo, "excede_capacidad": costo > holgura,
+        "exceso": max(Decimal(0), costo - holgura),
     })
