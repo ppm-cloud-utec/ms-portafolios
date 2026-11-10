@@ -1,26 +1,28 @@
-"""Forma unica de respuesta para los 6 microservicios."""
+"""Contrato JSON de respuesta y contexto de seguridad de API Gateway REST."""
+import base64
+import binascii
 import json
+import os
 from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
-CORS = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type,Authorization",
-    "Content-Type": "application/json",
-}
+from src.validacion import ValidacionError
+
+
+def _cabeceras():
+    origen = os.getenv("CORS_ALLOWED_ORIGIN", "*")
+    return {
+        "Access-Control-Allow-Origin": origen,
+        "Access-Control-Allow-Headers": "Content-Type,Authorization",
+        "Vary": "Origin",
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+    }
 
 
 class _Codificador(json.JSONEncoder):
-    """Serializa lo que json no sabe manejar solo.
-
-    - Decimal: lo devuelve DynamoDB. Se mantiene como entero cuando no tiene
-      parte decimal, para que un COUNT(*) de 3 no llegue al frontend como 3.0.
-    - date / datetime: los devuelve psycopg en las columnas DATE y TIMESTAMPTZ.
-      Sin esto, cualquier endpoint que exponga una fecha revienta con 502.
-    - UUID: los devuelve psycopg en las columnas UUID.
-    """
-
     def default(self, o):
         if isinstance(o, Decimal):
             return float(o) if o % 1 else int(o)
@@ -33,42 +35,62 @@ class _Codificador(json.JSONEncoder):
 
 def ok(datos, meta=None, estado=200):
     cuerpo = {"ok": True, "datos": datos}
-    if meta:
+    if meta is not None:
         cuerpo["meta"] = meta
-    return {
-        "statusCode": estado,
-        "headers": CORS,
-        "body": json.dumps(cuerpo, cls=_Codificador, ensure_ascii=False),
-    }
+    return {"statusCode": estado, "headers": _cabeceras(),
+            "body": json.dumps(cuerpo, cls=_Codificador, ensure_ascii=False, allow_nan=False)}
 
 
 def error(codigo, mensaje, estado=400):
-    return {
-        "statusCode": estado,
-        "headers": CORS,
-        "body": json.dumps(
-            {"ok": False, "error": {"codigo": codigo, "mensaje": mensaje}},
-            ensure_ascii=False,
-        ),
-    }
+    return {"statusCode": estado, "headers": _cabeceras(),
+            "body": json.dumps({"ok": False, "error": {"codigo": codigo, "mensaje": mensaje}},
+                               ensure_ascii=False)}
+
+
+def _autorizador(event):
+    ctx = (event.get("requestContext") or {}).get("authorizer") or {}
+    if not isinstance(ctx, dict):
+        raise PermissionError("Sin contexto de autorización")
+    return ctx
 
 
 def tenant_de(event):
-    """El tenant_id SOLO sale del authorizer, nunca del body ni del query string.
-
-    Si lo lees de otro lado, cualquier usuario puede pedir los datos de otro
-    tenant cambiando un parametro.
-    """
-    return event["requestContext"]["authorizer"]["tenant_id"]
+    from src.db import SCHEMAS
+    tenant = _autorizador(event).get("tenant_id")
+    if tenant not in SCHEMAS:
+        raise PermissionError("Tenant no autorizado")
+    return tenant
 
 
 def usuario_de(event):
-    return event["requestContext"]["authorizer"]["usuario_id"]
+    from uuid import UUID
+    usuario = _autorizador(event).get("usuario_id")
+    try:
+        return str(UUID(str(usuario)))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise PermissionError("Identidad no válida") from exc
 
 
 def rol_de(event):
-    return event["requestContext"]["authorizer"]["rol"]
+    rol = _autorizador(event).get("rol")
+    if rol not in ("admin", "pmo", "pm", "miembro"):
+        raise PermissionError("Rol inválido")
+    return rol
 
 
 def cuerpo_de(event):
-    return json.loads(event.get("body") or "{}")
+    body = event.get("body") or "{}"
+    if event.get("isBase64Encoded"):
+        try:
+            body = base64.b64decode(body, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ValidacionError("El cuerpo no contiene base64 válido") from exc
+    if len(body if isinstance(body, bytes) else body.encode("utf-8")) > 16 * 1024:
+        raise ValidacionError("El cuerpo supera el límite de 16 KiB")
+    try:
+        obj = json.loads(body)
+    except (UnicodeError, json.JSONDecodeError, TypeError) as exc:
+        raise ValidacionError("El cuerpo debe contener JSON válido") from exc
+    if not isinstance(obj, dict):
+        raise ValidacionError("El cuerpo debe ser un objeto JSON")
+    return obj
