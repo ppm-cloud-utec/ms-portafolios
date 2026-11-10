@@ -17,7 +17,9 @@ CREATE TABLE IF NOT EXISTS portafolios (
     capacidad_horas_semana  INTEGER     NOT NULL DEFAULT 0,
     activo                  BOOLEAN     NOT NULL DEFAULT TRUE,
     creado_en               TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (nombre)
+    UNIQUE (nombre),
+    CHECK (presupuesto_disponible >= 0),
+    CHECK (capacidad_horas_semana >= 0)
 );
 
 -- -------------------------------------------------------------------- estados
@@ -57,9 +59,13 @@ CREATE TABLE IF NOT EXISTS proyectos (
     en_riesgo               BOOLEAN     NOT NULL DEFAULT FALSE, -- de ms-presupuestos
     creado_en               TIMESTAMPTZ NOT NULL DEFAULT now(),
     actualizado_en          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    ultimo_evento_tareas_en TIMESTAMPTZ,
     UNIQUE (codigo),
     CHECK (salud IN ('verde', 'ambar', 'rojo')),
-    CHECK (avance_pct BETWEEN 0 AND 100)
+    CHECK (avance_pct BETWEEN 0 AND 100),
+    CHECK (prioridad_score BETWEEN 0 AND 100),
+    CHECK (presupuesto_estimado >= 0),
+    CHECK (fecha_fin_estimada IS NULL OR fecha_inicio IS NULL OR fecha_fin_estimada >= fecha_inicio)
 );
 
 CREATE INDEX IF NOT EXISTS ix_proyectos_portafolio ON proyectos (portafolio_id);
@@ -91,7 +97,10 @@ CREATE TABLE IF NOT EXISTS propuestas (
     CHECK (estado IN ('pendiente', 'aprobada', 'rechazada')),
     CHECK (valor_estrategico BETWEEN 1 AND 5),
     CHECK (urgencia BETWEEN 1 AND 5),
-    CHECK (riesgo BETWEEN 1 AND 5)
+    CHECK (riesgo BETWEEN 1 AND 5),
+    CHECK (costo_estimado > 0),
+    CHECK (beneficio_esperado >= 0),
+    CHECK (score BETWEEN 0 AND 100)
 );
 
 CREATE INDEX IF NOT EXISTS ix_propuestas_estado ON propuestas (estado, score DESC);
@@ -121,3 +130,19 @@ CREATE TABLE IF NOT EXISTS eventos_procesados (
     tipo         TEXT NOT NULL,
     procesado_en TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Migración aditiva segura para bases creadas con la versión anterior.
+ALTER TABLE proyectos ADD COLUMN IF NOT EXISTS ultimo_evento_tareas_en TIMESTAMPTZ;
+
+-- Transactional outbox: eventos nunca se pierden entre COMMIT y SNS.
+CREATE TABLE IF NOT EXISTS outbox_eventos (
+    evento_id UUID PRIMARY KEY,
+    tipo TEXT NOT NULL,
+    datos JSONB NOT NULL,
+    creado_en TIMESTAMPTZ NOT NULL DEFAULT now(),
+    publicado_en TIMESTAMPTZ,
+    intentos INTEGER NOT NULL DEFAULT 0,
+    ultimo_error TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_outbox_pendientes
+    ON outbox_eventos (creado_en, evento_id) WHERE publicado_en IS NULL;
