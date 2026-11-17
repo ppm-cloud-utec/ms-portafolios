@@ -1,39 +1,36 @@
 """Conexión PostgreSQL con selección de schema exclusivamente por identidad JWT."""
 import os
-import time
 from contextlib import contextmanager
 
-import boto3
 import psycopg
 
-from src import tenants
+from src import secretos, tenants
 
 _password = None
 _expira = 0
 
 
-def password_bd():
-    """No resuelve el secreto en CloudFormation ni lo graba en env de Lambda."""
-    global _password, _expira
-    # Solo para pruebas locales; en AWS se configura DB_PASSWORD_PARAM.
-    if os.environ.get("DB_PASSWORD"):
-        return os.environ["DB_PASSWORD"]
-    parametro = os.environ["DB_PASSWORD_PARAM"]
-    if _password is None or time.monotonic() >= _expira:
-        _password = boto3.client("ssm").get_parameter(
-            Name=parametro, WithDecryption=True
-        )["Parameter"]["Value"]
-        _expira = time.monotonic() + 300
-    return _password
+def _credenciales():
+    """Usuario y clave del servicio, desde Secrets Manager.
+
+    Antes la clave salia de SSM y el usuario venia grabado en el entorno de
+    la Lambda. Ahora los dos viven en el mismo secreto JSON y el entorno solo
+    lleva su nombre.
+    """
+    if os.environ.get("DB_PASSWORD"):  # solo para pruebas locales
+        return os.environ["DB_USER"], os.environ["DB_PASSWORD"]
+    nombre = os.environ["DB_SECRETO"]
+    return secretos.campo(nombre, "username"), secretos.campo(nombre, "password")
 
 
 def _parametros():
+    _usuario, _clave = _credenciales()
     return {
         "host": os.environ["DB_HOST"],
         "port": int(os.environ.get("DB_PORT", "5432")),
         "dbname": os.environ.get("DB_NAME", "ppm_portafolios"),
-        "user": os.environ["DB_USER"],
-        "password": password_bd(),
+        "user": _usuario,
+        "password": _clave,
         "connect_timeout": 5,
         "sslmode": os.environ.get("DB_SSLMODE", "require"),
         "application_name": "ms-portafolios",

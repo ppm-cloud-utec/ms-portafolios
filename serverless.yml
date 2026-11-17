@@ -19,9 +19,10 @@ provider:
     SNS_TOPIC_ARN: ${cf:infra-compartida-${sls:stage}.SnsEventosArn}
     DB_HOST: ${cf:infra-compartida-${sls:stage}.RdsEndpoint}
     DB_NAME: ppm_portafolios
-    DB_USER: ${ssm:/ppm/portafolios/db-user}
+    # Usuario y clave viven juntos en este secreto; el entorno solo lleva
+    # su nombre. Ver src/secretos.py.
+    DB_SECRETO: ppm/portafolios/db
     # El secreto se consulta en runtime, no se almacena en CloudFormation.
-    DB_PASSWORD_PARAM: /ppm/portafolios/db-password
     DB_SSLMODE: require
     CORS_ALLOWED_ORIGIN: ${env:PPM_ALLOWED_ORIGIN, '*'}
   # AWS Academy: reutilizamos LabRole (permisos deben verificarse).
