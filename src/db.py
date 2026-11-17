@@ -6,7 +6,8 @@ from contextlib import contextmanager
 import boto3
 import psycopg
 
-SCHEMAS = {"t-acme": "t_acme", "t-globex": "t_globex", "t-initech": "t_initech"}
+from src import tenants
+
 _password = None
 _expira = 0
 
@@ -41,7 +42,8 @@ def _parametros():
 
 @contextmanager
 def conexion(tenant_id):
-    schema = SCHEMAS.get(tenant_id)
+    # La lista de tenants vive en SSM, no en el codigo: ver src/tenants.py.
+    schema = tenants.schema_de(tenant_id)
     if schema is None:
         raise PermissionError("Tenant no autorizado")
     with psycopg.connect(**_parametros()) as con:
