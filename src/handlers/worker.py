@@ -6,7 +6,7 @@ from uuid import UUID
 
 from psycopg.rows import dict_row
 
-from src import db
+from src import db, tenants
 from src.dominio import salud
 
 log = logging.getLogger(__name__)
@@ -98,7 +98,7 @@ def procesar_registro(registro):
         raise ValueError("Versión de evento no soportada")
     evento_id = str(UUID(evento["evento_id"]))
     tenant = evento["tenant_id"]
-    if tenant not in db.SCHEMAS:
+    if tenant not in tenants.habilitados():
         raise ValueError("Tenant de evento desconocido")
     datos = evento.get("datos")
     if not isinstance(datos, dict):

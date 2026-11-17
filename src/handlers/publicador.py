@@ -1,6 +1,6 @@
 """Reenvío periódico de eventos transaccionales pendientes."""
 import logging
-from src import db
+from src import db, tenants
 from src.eventos import publicar_pendientes
 
 log = logging.getLogger(__name__)
@@ -9,7 +9,7 @@ log.setLevel(logging.INFO)
 
 def manejar(event, context):
     total, errores = 0, 0
-    for tenant in db.SCHEMAS:
+    for tenant in tenants.habilitados():
         try:
             total += publicar_pendientes(tenant, limite=100)
         except Exception:

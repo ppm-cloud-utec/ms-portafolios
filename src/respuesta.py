@@ -55,9 +55,9 @@ def _autorizador(event):
 
 
 def tenant_de(event):
-    from src.db import SCHEMAS
+    from src import tenants
     tenant = _autorizador(event).get("tenant_id")
-    if tenant not in SCHEMAS:
+    if tenant not in tenants.habilitados():
         raise PermissionError("Tenant no autorizado")
     return tenant
 
