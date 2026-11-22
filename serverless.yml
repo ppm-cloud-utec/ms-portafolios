@@ -7,6 +7,11 @@ frameworkVersion: "3"
 
 provider:
   name: aws
+  # Usa la API Gateway unica de infra-compartida en vez de crear una
+  # propia. Todas las rutas de este servicio viven bajo /portafolios.
+  apiGateway:
+    restApiId: ${cf:infra-compartida-${sls:stage}.ApiId}
+    restApiRootResourceId: ${cf:infra-compartida-${sls:stage}.ApiRootResourceId}
   runtime: python3.12
   region: us-east-1
   stage: ${opt:stage, "dev"}
@@ -64,89 +69,86 @@ custom:
     # deja en root:root mientras el otro lo lee -> EACCES.
     cacheLocation: ./.serverless-cache
   autorizador:
-    # El authorizer vive en infra-compartida y lo comparten los 6 microservicios
-    name: autorizadorCompartido
-    type: request
-    arn: ${cf:infra-compartida-${sls:stage}.AutorizadorArn}
-    resultTtlInSeconds: 300
-    identitySource: method.request.header.Authorization
+    # Registrado una sola vez en la API compartida (infra-compartida).
+    type: CUSTOM
+    authorizerId: ${cf:infra-compartida-${sls:stage}.AutorizadorApiId}
 
 functions:
 
   health:
     handler: src/handlers/health.manejar
     events:
-      - http: { path: "/health", method: get, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/portafolios/health", method: get, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
   # ---------- Portafolios ----------
   listarPortafolios:
     handler: src/handlers/portafolios.listar
     description: Portafolios con el resumen de sus proyectos
     events:
-      - http: { path: "/portafolios", method: get, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/portafolios/portafolios", method: get, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
   obtenerPortafolio:
     handler: src/handlers/portafolios.obtener
     events:
-      - http: { path: "/portafolios/{id}", method: get, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/portafolios/portafolios/{id}", method: get, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
   crearPortafolio:
     handler: src/handlers/portafolios.crear
     events:
-      - http: { path: "/portafolios", method: post, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/portafolios/portafolios", method: post, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
   # ---------- Proyectos ----------
   listarProyectos:
     handler: src/handlers/proyectos.listar
     description: Listado filtrable por estado, portafolio, salud y riesgo
     events:
-      - http: { path: "/proyectos", method: get, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/portafolios/proyectos", method: get, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
   obtenerProyecto:
     handler: src/handlers/proyectos.obtener
     events:
-      - http: { path: "/proyectos/{id}", method: get, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/portafolios/proyectos/{id}", method: get, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
   crearProyecto:
     handler: src/handlers/proyectos.crear
     description: Publica proyecto.creado
     events:
-      - http: { path: "/proyectos", method: post, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/portafolios/proyectos", method: post, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
   actualizarProyecto:
     handler: src/handlers/proyectos.actualizar
     description: Publica proyecto.priorizado si cambia la prioridad
     events:
-      - http: { path: "/proyectos/{id}", method: put, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/portafolios/proyectos/{id}", method: put, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
   # ---------- Admision de demanda ----------
   listarPropuestas:
     handler: src/handlers/propuestas.listar
     description: La bandeja de admision, rankeada por score
     events:
-      - http: { path: "/propuestas", method: get, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/portafolios/propuestas", method: get, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
   crearPropuesta:
     handler: src/handlers/propuestas.crear
     events:
-      - http: { path: "/propuestas", method: post, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/portafolios/propuestas", method: post, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
   aprobarPropuesta:
     handler: src/handlers/propuestas.aprobar
     description: Convierte la propuesta en proyecto y publica proyecto.creado
     events:
-      - http: { path: "/propuestas/{id}/aprobar", method: post, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/portafolios/propuestas/{id}/aprobar", method: post, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
   rechazarPropuesta:
     handler: src/handlers/propuestas.rechazar
     events:
-      - http: { path: "/propuestas/{id}/rechazar", method: post, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/portafolios/propuestas/{id}/rechazar", method: post, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
   priorizacion:
     handler: src/handlers/propuestas.priorizacion
     description: Ranking mas el consumo de presupuesto de la seleccion
     events:
-      - http: { path: "/priorizacion", method: get, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
+      - http: { path: "/portafolios/priorizacion", method: get, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
   # ---------- Reintentos de eventos pendientes (outbox) ----------
   publicadorOutbox:
@@ -238,45 +240,4 @@ resources:
                 ArnEquals:
                   aws:SourceArn: ${cf:infra-compartida-${sls:stage}.SnsEventosArn}
 
-    # ---------- CORS en las respuestas de ERROR ----------
-    # API Gateway genera los 401/403 ANTES de llegar a la Lambda, y esas
-    # respuestas no llevan cabeceras CORS. Desde el navegador un 401 se ve
-    # entonces como un error de CORS, no como un 401: el frontend no puede
-    # distinguir "tu sesion vencio" de "el servidor no responde".
-    Cors401:
-      Type: AWS::ApiGateway::GatewayResponse
-      Properties:
-        RestApiId: !Ref ApiGatewayRestApi
-        ResponseType: UNAUTHORIZED
-        StatusCode: "401"
-        ResponseParameters:
-          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
-          gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
 
-    Cors403:
-      Type: AWS::ApiGateway::GatewayResponse
-      Properties:
-        RestApiId: !Ref ApiGatewayRestApi
-        ResponseType: ACCESS_DENIED
-        StatusCode: "403"
-        ResponseParameters:
-          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
-          gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
-
-    Cors4xx:
-      Type: AWS::ApiGateway::GatewayResponse
-      Properties:
-        RestApiId: !Ref ApiGatewayRestApi
-        ResponseType: DEFAULT_4XX
-        ResponseParameters:
-          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
-          gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
-
-    Cors5xx:
-      Type: AWS::ApiGateway::GatewayResponse
-      Properties:
-        RestApiId: !Ref ApiGatewayRestApi
-        ResponseType: DEFAULT_5XX
-        ResponseParameters:
-          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
-          gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
