@@ -1,14 +1,9 @@
 service: ms-portafolios
 
-# Se usa la v3 a proposito: la v4 exige una cuenta de serverless.com y un
-# SERVERLESS_ACCESS_KEY para cada deploy. La v3 solo necesita credenciales
-# de AWS, que es lo unico que da el Learner Lab.
 frameworkVersion: "3"
 
 provider:
   name: aws
-  # Usa la API Gateway unica de infra-compartida en vez de crear una
-  # propia. Todas las rutas de este servicio viven bajo /portafolios.
   apiGateway:
     restApiId: ${cf:infra-compartida-${sls:stage}.ApiId}
     restApiRootResourceId: ${cf:infra-compartida-${sls:stage}.ApiRootResourceId}
@@ -24,27 +19,16 @@ provider:
     SNS_TOPIC_ARN: ${cf:infra-compartida-${sls:stage}.SnsEventosArn}
     DB_HOST: ${cf:infra-compartida-${sls:stage}.RdsEndpoint}
     DB_NAME: ppm_portafolios
-    # Usuario y clave viven juntos en este secreto; el entorno solo lleva
-    # su nombre. Ver src/secretos.py.
     DB_SECRETO: ppm/portafolios/db
-    # El secreto se consulta en runtime, no se almacena en CloudFormation.
     DB_SSLMODE: require
     CORS_ALLOWED_ORIGIN: ${env:PPM_ALLOWED_ORIGIN, '*'}
-  # AWS Academy: reutilizamos LabRole (permisos deben verificarse).
-  # Fuera del laboratorio, sustituir por un rol de mínimo privilegio por función.
   iam:
     role: arn:aws:iam::${aws:accountId}:role/LabRole
-  # Requiere ssm:GetParameter y sns:Publish, además de permisos VPC si aplica.
-  # VPC: configurar con los outputs REALES de infra-compartida si RDS es privado.
-  # vpc:
-  #   securityGroupIds: [${cf:infra-compartida-${sls:stage}.LambdaSecurityGroupId}]
-  #   subnetIds: [${cf:infra-compartida-${sls:stage}.PrivateSubnetA}, ${cf:infra-compartida-${sls:stage}.PrivateSubnetB}]
 package:
   individually: false
   patterns:
     - "!**"
     - "src/**"
-    # El aprovisionador lee este DDL para crear el schema de un tenant nuevo.
     - "seed/esquema.sql"
 
 plugins:
@@ -58,18 +42,10 @@ custom:
       - Authorization
     allowCredentials: false
   pythonRequirements:
-    # true, no "non-linux": en Linux "non-linux" NO usa Docker y busca un
-    # binario python3.12 local, que no existe (el sistema trae 3.14).
-    # Forzar Docker ademas garantiza que psycopg se compile contra Amazon
-    # Linux, que es donde corre la Lambda.
     dockerizePip: true
     slim: true
-    # Cache propio por repo. El cache global de ~/.cache lo comparten todos
-    # los servicios, y si dos despliegues corren a la vez un contenedor lo
-    # deja en root:root mientras el otro lo lee -> EACCES.
     cacheLocation: ./.serverless-cache
   autorizador:
-    # Registrado una sola vez en la API compartida (infra-compartida).
     type: CUSTOM
     authorizerId: ${cf:infra-compartida-${sls:stage}.AutorizadorApiId}
 
@@ -150,7 +126,6 @@ functions:
     events:
       - http: { path: "/portafolios/priorizacion", method: get, cors: "${self:custom.cors}", authorizer: "${self:custom.autorizador}" }
 
-  # ---------- Reintentos de eventos pendientes (outbox) ----------
   publicadorOutbox:
     handler: src/handlers/publicador.manejar
     description: Reintentos cada minuto para eventos SNS pendientes
@@ -171,11 +146,6 @@ functions:
           functionResponseType: ReportBatchItemFailures
           maximumConcurrency: 2
 
-  # ---------- Aprovisionamiento de tenants ----------
-  # Sin evento http: las invoca la maquina de estados
-  # ppm-aprovisionar-tenant. El alta de una organizacion es una operacion de
-  # plataforma, no una operacion dentro de un tenant, asi que no se expone
-  # por la API de negocio.
   aprovisionarTenant:
     handler: src/handlers/aprovisionar.aprovisionar
     name: ms-portafolios-${sls:stage}-aprovisionarTenant
@@ -191,8 +161,6 @@ functions:
 resources:
   Resources:
 
-    # Cola propia de este consumidor. Cada microservicio tiene la suya: asi
-    # uno caido no afecta a los demas y sus mensajes se acumulan.
     ColaPortafolios:
       Type: AWS::SQS::Queue
       Properties:
@@ -208,8 +176,6 @@ resources:
         QueueName: ppm-cola-portafolios-dlq-${sls:stage}
         MessageRetentionPeriod: 1209600
 
-    # Suscripcion al topic compartido CON FILTRO: la cola solo recibe los 3
-    # tipos que este worker sabe procesar, no todo el trafico del sistema.
     SuscripcionPortafolios:
       Type: AWS::SNS::Subscription
       Properties:
@@ -239,5 +205,4 @@ resources:
               Condition:
                 ArnEquals:
                   aws:SourceArn: ${cf:infra-compartida-${sls:stage}.SnsEventosArn}
-
 

@@ -1,22 +1,5 @@
 #!/usr/bin/env python3
-"""Carga 30,000 registros en ms-portafolios, repartidos en 3 tenants.
-
-    python seed/generar.py --esquema   # aplica esquema.sql en los 3 schemas
-    python seed/generar.py             # carga los datos
-    python seed/generar.py --contar    # cuenta lo que hay
-
-Reparto por tenant (10,000 registros):
-    portafolios         20
-    propuestas         300
-    proyectos          500
-    historial_estado  9,180
-                    ------
-                    10,000
-
-Los 3 tenants tienen PERFILES DISTINTOS a proposito: Acme son obras caras con
-pocos proyectos, Globex consultorias cortas y numerosas, Initech desarrollos de
-producto. Si los datos salieran iguales, el multi-tenancy se veria falso.
-"""
+"""Carga 30,000 registros en ms-portafolios, repartidos en 3 tenants."""
 import os
 import sys
 import random

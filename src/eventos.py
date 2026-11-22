@@ -1,8 +1,4 @@
-"""Outbox transaccional: cambios de BD y evento se confirman juntos.
-
-El envío SNS sucede DESPUÉS del commit, con reintentos programados. Los
-consumidores deben deduplicar por evento_id (entrega al menos una vez).
-"""
+"""Outbox transaccional: cambios de BD y evento se confirman juntos."""
 import json
 import logging
 import os
@@ -31,9 +27,7 @@ def encolar(cur, tipo, tenant_id, datos):
 
 
 def publicar_pendientes(tenant_id, ids=None, *, limite=20):
-    """Publica y marca en la misma transacción. Si hay crash, puede duplicar,
-    nunca perder un evento persistido. SKIP LOCKED evita publicadores simultáneos.
-    """
+    """Publica y marca en la misma transacción."""
     publicados = 0
     with db.conexion(tenant_id) as con:
         with con.cursor(row_factory=dict_row) as cur:
@@ -77,7 +71,6 @@ def publicar_pendientes(tenant_id, ids=None, *, limite=20):
                     """, (fila["evento_id"],))
                     publicados += 1
                 except Exception as exc:
-                    # Sin guardar el mensaje de error (puede contener datos sensibles).
                     cur.execute("""
                         UPDATE outbox_eventos
                         SET intentos = intentos + 1, ultimo_error = %s

@@ -16,6 +16,5 @@ def manejar(event, context):
             errores += 1
             log.exception("No se pudo publicar outbox para un tenant")
     if errores:
-        # Fallar cron permite observar el error mediante Lambda Errors/CloudWatch.
         raise RuntimeError("Fallo reintento outbox para uno o más tenants")
     return {"publicados": total}
