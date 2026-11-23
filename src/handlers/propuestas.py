@@ -85,6 +85,25 @@ def aprobar(event, context):
                 return error("NO_ENCONTRADO", "Propuesta no encontrada", 404)
             if propuesta["estado"] != "pendiente":
                 return error("YA_DECIDIDA", "La propuesta ya tiene una decisión", 409)
+            # Bloquea el portafolio: dos aprobaciones a la vez no pueden pasarse del presupuesto.
+            cur.execute("""
+                SELECT activo, presupuesto_disponible FROM portafolios
+                WHERE id = %s FOR UPDATE
+            """, (propuesta["portafolio_id"],))
+            portafolio = cur.fetchone()
+            if not portafolio or not portafolio["activo"]:
+                return error("PORTAFOLIO_INVALIDO", "El portafolio no existe o está inactivo", 409)
+            cur.execute("""
+                SELECT COALESCE(SUM(presupuesto_estimado), 0) AS comprometido
+                FROM proyectos
+                WHERE portafolio_id = %s AND estado IN ('aprobado', 'en_curso', 'en_pausa')
+            """, (propuesta["portafolio_id"],))
+            comprometido = cur.fetchone()["comprometido"]
+            holgura = portafolio["presupuesto_disponible"] - comprometido
+            if propuesta["costo_estimado"] > holgura:
+                return error("PRESUPUESTO_INSUFICIENTE",
+                             f"El costo ({propuesta['costo_estimado']}) supera la holgura "
+                             f"del portafolio ({holgura})", 409)
             # Código único independiente de la secuencia BIGSERIAL del id.
             import uuid
             codigo = f"PRY-{uuid.uuid4().hex[:12].upper()}"
@@ -175,7 +194,7 @@ def priorizacion(event, context):
             disponible = cur.fetchone()["disponible"]
             cur.execute(f"""
                 SELECT COALESCE(SUM(p.presupuesto_estimado),0) AS comprometido
-                FROM proyectos p WHERE p.estado IN ('aprobado','en_curso')
+                FROM proyectos p WHERE p.estado IN ('aprobado','en_curso','en_pausa')
                 {filtro.replace('pr.portafolio_id', 'p.portafolio_id')}
             """, valores)
             comprometido = cur.fetchone()["comprometido"]
