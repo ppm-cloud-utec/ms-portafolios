@@ -100,7 +100,9 @@ CREATE TABLE IF NOT EXISTS propuestas (
     CHECK (riesgo BETWEEN 1 AND 5),
     CHECK (costo_estimado > 0),
     CHECK (beneficio_esperado >= 0),
-    CHECK (score BETWEEN 0 AND 100)
+    CHECK (score BETWEEN 0 AND 100),
+    -- una propuesta genera a lo sumo un proyecto y un proyecto viene de una sola propuesta
+    CONSTRAINT propuestas_proyecto_id_key UNIQUE (proyecto_id)
 );
 
 CREATE INDEX IF NOT EXISTS ix_propuestas_estado ON propuestas (estado, score DESC);

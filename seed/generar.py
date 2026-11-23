@@ -220,10 +220,28 @@ def contar():
     print(f"  TOTAL {gran_total:>24}")
 
 
+def migrar():
+    """Agrega la unicidad de propuestas.proyecto_id en todos los schemas."""
+    with psycopg.connect(**dsn()) as con, con.cursor() as cur:
+        cur.execute("""
+            SELECT t.table_schema FROM information_schema.tables t
+            WHERE t.table_name = 'propuestas' AND NOT EXISTS (
+                SELECT 1 FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace
+                WHERE n.nspname = t.table_schema AND c.conname = 'propuestas_proyecto_id_key')
+            ORDER BY 1
+        """)
+        for (schema,) in cur.fetchall():
+            cur.execute(f"ALTER TABLE {schema}.propuestas "
+                        "ADD CONSTRAINT propuestas_proyecto_id_key UNIQUE (proyecto_id)")
+            print(f"  {schema}: UNIQUE (proyecto_id) en propuestas")
+        con.commit()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--esquema", action="store_true")
     ap.add_argument("--contar", action="store_true")
+    ap.add_argument("--migrar", action="store_true")
     ap.add_argument("--tenant", choices=list(SCHEMAS))
     args = ap.parse_args()
 
@@ -235,6 +253,8 @@ def main():
         return aplicar_esquema()
     if args.contar:
         return contar()
+    if args.migrar:
+        return migrar()
 
     random.seed(2026)   # reproducible
     objetivo = {args.tenant: PERFILES[args.tenant]} if args.tenant else PERFILES
